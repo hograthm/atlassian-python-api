@@ -2,6 +2,7 @@
 import logging
 
 from deprecated import deprecated
+from requests import HTTPError
 
 from .base import BitbucketBase
 from atlassian.bitbucket.cloud import Cloud
@@ -295,6 +296,21 @@ class Bitbucket(BitbucketBase):
         """
         url = self._url_project(key)
         return self.get(url) or {}
+
+    def project_exists(self, project_key):
+        """
+        Check if project with the provided project key exists and available.
+        :param project_key: Key of the project where to check for repository.
+        :return: False is requested repository doesn't exist in the project or not accessible to the requestor
+        """
+        exists = False
+        try:
+            self.project(project_key)
+            exists = True
+        except HTTPError as e:
+            if e.response.status_code in (401, 404):
+                pass
+        return exists
 
     def update_project(self, key, **params):
         """
@@ -679,6 +695,22 @@ class Bitbucket(BitbucketBase):
         """
         url = self._url_repo(project_key, repository_slug)
         return self.get(url)
+
+    def repo_exists(self, project_key, repository_slug):
+        """
+        Check if given combination of project and repository exists and available.
+        :param project_key: Key of the project where to check for repository.
+        :param repository_slug: url-compatible repository identifier to look for.
+        :return: False is requested repository doesn't exist in the project or not accessible to the requestor
+        """
+        exists = False
+        try:
+            self.get_repo(project_key, repository_slug)
+            exists = True
+        except HTTPError as e:
+            if e.response.status_code in (401, 404):
+                pass
+        return exists
 
     def update_repo(self, project_key, repository_slug, **params):
         """
@@ -1460,7 +1492,7 @@ class Bitbucket(BitbucketBase):
         :param pr_version: 12
         :return:
         """
-        url = self._url_pull_request(project_key, repository_slug, pr_id)
+        url = "{}/decline".format(self._url_pull_request(project_key, repository_slug, pr_id))
         params = {}
         if not self.cloud:
             params["version"] = pr_version
