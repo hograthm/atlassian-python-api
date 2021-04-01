@@ -805,6 +805,19 @@ class Jira(AtlassianRestAPI):
     def update_issue_field(self, key, fields="*all"):
         return self.put("rest/api/2/issue/{0}".format(key), data={"fields": fields})
 
+    def bulk_update_issue_field(self, key_list, fields="*all"):
+        """
+        :param key_list=list of issues with common filed to be updated
+        :param fields: common fields to be updated
+        return Boolean True/False
+        """
+        try:
+            for key in key_list:
+                self.put("rest/api/2/issue/{0}".format(key), data={"fields": fields})
+        except Exception:
+            return False
+        return True
+
     def get_issue_labels(self, issue_key):
         """
         Get issue labels.
@@ -1432,15 +1445,28 @@ class Jira(AtlassianRestAPI):
 
     def user_find_by_user_string(
         self,
-        username,
+        username=None,
+        query=None,
+        account_id=None,
+        property_key=None,
         start=0,
         limit=50,
         include_inactive_users=False,
         include_active_users=True,
     ):
         """
-        Fuzzy search using username and display name
-        :param username: Use '.' to find all users
+        Fuzzy search using display name, emailAddress or property, or an exact search for accountId or username
+
+        On Jira Cloud, you can use only one of query or account_id params. You may not specify username.
+        On Jira Server, you must specify a username. You may not use query, account_id or property_key.
+
+        :param username: OPTIONAL: Required for Jira Server, cannot be used on Jira Cloud.
+                Use '.' to find all users.
+        :param query: OPTIONAL: String matched against "displayName" and "emailAddress" user attributes
+        :param account_id: OPTIONAL: String matched exactly against a user "accountId".
+                Required unless "query" or "property" parameters are specified.
+        :param property_key: OPTIONAL: String used to search properties by key. Required unless
+                "account_id" or "query" is specified.
         :param start: OPTIONAL: The start point of the collection to return. Default: 0.
         :param limit: OPTIONAL: The limit of the number of users to return, this may be restricted by
                 fixed system limits. Default by built-in method: 50
@@ -1450,12 +1476,33 @@ class Jira(AtlassianRestAPI):
         """
         url = "rest/api/2/user/search"
         params = {
-            "username": username,
             "includeActive": include_active_users,
             "includeInactive": include_inactive_users,
             "startAt": start,
             "maxResults": limit,
         }
+
+        if self.cloud:
+            if username:
+                return "Jira Cloud no longer supports a username parameter, use account_id, query or property_key"
+            elif account_id and query:
+                return "You cannot specify both the query and account_id parameters"
+            elif not any([account_id, query, property_key]):
+                return "You must specify at least one parameter: query or account_id or property_key"
+            elif account_id:
+                params["accountId"] = account_id
+
+            if query:
+                params["query"] = query
+            if property_key:
+                params["property"] = property_key
+        elif not username:
+            return "Username parameter is required for user search on Jira Server"
+        elif any([account_id, query, property_key]):
+            return "Jira Server does not support account_id, query or property_key parameters"
+        else:
+            params["username"] = username
+
         return self.get(url, params=params)
 
     def is_user_in_application(self, username, application_key):
@@ -1488,10 +1535,10 @@ class Jira(AtlassianRestAPI):
     Reference: https://docs.atlassian.com/software/jira/docs/api/REST/8.5.0/#api/2/project
     """
 
-    def get_all_projects(self, included_archived=None):
-        return self.projects(included_archived)
+    def get_all_projects(self, included_archived=None, expand=None):
+        return self.projects(included_archived, expand)
 
-    def projects(self, included_archived=None):
+    def projects(self, included_archived=None, expand=None):
         """Returns all projects which are visible for the currently logged in user.
         If no user is logged in, it returns the list of projects that are visible when using anonymous access.
         :param included_archived: boolean whether to include archived projects in response, default: false
@@ -1500,7 +1547,9 @@ class Jira(AtlassianRestAPI):
         params = {}
         if included_archived:
             params["includeArchived"] = included_archived
-        return self.get("rest/api/2/project")
+        if expand:
+            params["expand"] = expand
+        return self.get("rest/api/2/project", params=params)
 
     def create_project_from_raw_json(self, json):
         """
@@ -1525,6 +1574,19 @@ class Jira(AtlassianRestAPI):
         """
         return self.post("rest/api/2/project", json=json)
 
+    def create_project_from_shared_template(self, project_id, key, name, lead):
+        """
+        Creates a new project based on an existing project.
+        :param str project_id: The numeric ID of the project to clone
+        :param str key: The KEY to use for the new project, e.g. KEY-10000
+        :param str name: The name of the new project
+        :param str lead: The username of the project lead
+        :return:
+        """
+        json = {"key": key, "name": name, "lead": lead}
+
+        return self.post("rest/project-templates/1.0/createshared/{}".format(project_id), json=json)
+
     def delete_project(self, key):
         """
         DELETE /rest/api/2/project/<project_key>
@@ -1539,7 +1601,7 @@ class Jira(AtlassianRestAPI):
             params["expand"] = expand
         return self.get("rest/api/2/project/{0}".format(key), params=params)
 
-    def get_project(self, key, expand):
+    def get_project(self, key, expand=None):
         """
             Contains a full representation of a project in JSON format.
             All project keys associated with the project will only be returned if expand=projectKeys.
@@ -2383,7 +2445,7 @@ api-group-workflows/#api-rest-api-2-workflow-search-get)
         :return a json of installed plugins
         """
         url = "rest/plugins/1.0/"
-        return self.get(url, headers=self.no_check_headers)
+        return self.get(url, headers=self.no_check_headers, trailing=True)
 
     def upload_plugin(self, plugin_path):
         """
@@ -3381,6 +3443,35 @@ api-group-workflows/#api-rest-api-2-workflow-search-get)
         url = "rest/agile/1.0/{board_id}/backlog".format(board_id=board_id)
         return self.get(url)
 
+    def get_issues_for_board(self, board_id, jql, fields="*all", start=0, limit=None, expand=None):
+        """
+        Get issues for board
+        :param board_id: int, str
+        :param jql:
+        :param fields: list of fields, for example: ['priority', 'summary', 'customfield_10007']
+        :param start: OPTIONAL: The start point of the collection to return. Default: 0.
+        :param limit: OPTIONAL: The limit of the number of issues to return, this may be restricted by
+                fixed system limits. Default by built-in method: 50
+        :param expand: OPTIONAL: expand the search result
+        :return:
+        """
+        params = {}
+        if start is not None:
+            params["startAt"] = int(start)
+        if limit is not None:
+            params["maxResults"] = int(limit)
+        if fields is not None:
+            if isinstance(fields, (list, tuple, set)):
+                fields = ",".join(fields)
+            params["fields"] = fields
+        if jql is not None:
+            params["jql"] = jql
+        if expand is not None:
+            params["expand"] = expand
+
+        url = "rest/agile/1.0/board/{board_id}/issue".format(board_id=board_id)
+        return self.get(url, params=params)
+
     def delete_agile_board(self, board_id):
         """
         Delete agile board by id
@@ -3565,6 +3656,24 @@ api-group-workflows/#api-rest-api-2-workflow-search-get)
                 "rankCustomFieldId": customfield_number,
             },
         )
+
+    def dvcs_get_linked_repos(self):
+        """
+        Get DVCS linked repos
+        :return:
+        """
+        url = "rest/bitbucket/1.0/repositories"
+        return self.get(url)
+
+    def dvcs_update_linked_repo_with_remote(self, repository_id):
+        """
+        Resync delayed sync repo
+        https://confluence.atlassian.com/jirakb/delays-for-commits-to-display-in-development-panel-in-jira-server-779160823.html
+        :param repository_id:
+        :return:
+        """
+        url = "rest/bitbucket/1.0/repositories/{}/sync".format(repository_id)
+        return self.post(url)
 
     def health_check(self):
         """
